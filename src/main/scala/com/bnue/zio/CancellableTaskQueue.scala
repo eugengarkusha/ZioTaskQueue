@@ -145,7 +145,7 @@ object CancellableTaskQueue {
         // To do this in type safe manner we'd have to put 2 Promises into 'Add' msg: 1) HookStatus, 2)Duplicate.type and race between them. This way we could ensure that duplicte msg never shows up in this method.
         val awaitNoDuplicateUnsfe: CompleteHook[E, V] => UIO[HookStatus[E, V]] =
           _.await.flatMap{
-            case Duplicate => IO.dieMessage("improggress task is completed with Duplicate")
+            case Duplicate => IO.dieMessage("in progress task is completed with 'Duplicate'")
             case h: HookStatus[E, V] => IO.succeed(h)
           }
         UIO(keyStore.get(key)).flatMap{
