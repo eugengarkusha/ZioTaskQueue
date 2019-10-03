@@ -9,7 +9,6 @@ import zio.Exit.{Failure, Success}
 
 import scala.collection.concurrent.TrieMap
 
-//. TODO: key to id map
 object CancellableTaskQueue {
   type CompleteHook[E, V]= Promise[Nothing, CompleteHookStatus[E, V]]
   type CancelHook[E, V]= Promise[Nothing, CancelHookStatus[E, V]]
@@ -34,11 +33,11 @@ object CancellableTaskQueue {
 
   // TODO: support parallelism
   // TODO: create looser version of this that captures V on put and completeHook, loose V in cancel
-  class Ops[K, E, V](q: Queue[Msg[K, E, V]], val getRegisteredTaskNames: UIO[collection.Set[K]] ) {
+  class Ops[K, E, V](q: Queue[Msg[K, E, V]], val getRegisteredTaskKeys: UIO[collection.Set[K]] ) {
     // q.offer cannot return false in case of unbounded queue
-    def put_(key: K, task: IO[E, V]): UIO[Unit] = q.offer(Add(key, task, None)).unit
+    def add_(key: K, task: IO[E, V]): UIO[Unit] = q.offer(Add(key, task, None)).unit
 
-    def put(key: K, task: IO[E, V]): UIO[CompleteHook[E, V]] =
+    def add(key: K, task: IO[E, V]): UIO[CompleteHook[E, V]] =
       Promise.make[Nothing, CompleteHookStatus[E, V]]
         .tap(p => q.offer(Add(key, task, Some(p))))
 
@@ -216,7 +215,7 @@ object CancellableTaskQueue {
        _ <- ZManaged.make(runProcessing(q, taskStore, keyStore, genNextId, inProgress, cancelInProgress, cancelRequestedBy, shutdown).fork)(t =>
          shutdown.set(true) *>
            // waking up in case if q is empty and runProcessing is locked on '.take'
-           ops.put_(null.asInstanceOf[K], IO.succeed(null.asInstanceOf[V]))
+           ops.add_(null.asInstanceOf[K], IO.succeed(null.asInstanceOf[V]))
            *> t.join
        )
       } yield ops

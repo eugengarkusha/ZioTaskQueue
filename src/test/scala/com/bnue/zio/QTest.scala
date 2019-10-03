@@ -36,7 +36,7 @@ object QTest extends TestSuite {
     test("put, cancel, doneCB, cancelCB")(
       CancellableTaskQueue[String, Unit, String].use { ops =>
         for {
-          z <- ops.put("k", ZIO.never.map(_ => "never"))
+          z <- ops.add("k", ZIO.never.map(_ => "never"))
           x <- z.await.race(UIO.succeed("win").delay(1.seconds))
           _ = assert(x == "win")
           zc  <- ops.cancel("k", Some("Joe"))
@@ -50,13 +50,13 @@ object QTest extends TestSuite {
       for{
         interruptedRef <- Ref.make(false)
         escapedOps <-  CancellableTaskQueue[String, Unit, String].use { ops =>
-          ops.put(
+          ops.add(
             "k",
             ZIO.never.run.flatMap(r => interruptedRef.set(r.interrupted).map(_ => ""))
           ).map(_ => ops)
         }
         cancelRes <- escapedOps.cancel("k", Some("Joe")).run
-        putRes <- escapedOps.put("k1", ZIO.never.map(_ =>"")).run
+        putRes <- escapedOps.add("k1", ZIO.never.map(_ =>"")).run
         taskInterrupted <- interruptedRef.get
          _ = assert(cancelRes.interrupted)
          _ = assert(putRes.interrupted)
@@ -68,7 +68,7 @@ object QTest extends TestSuite {
 
       CancellableTaskQueue[String, Unit, String].use { ops =>
         for {
-          t <- ops.put("k", ZIO.never.map(_ => "never").uninterruptible)
+          t <- ops.add("k", ZIO.never.map(_ => "never").uninterruptible)
           c  <- ops.cancel("k", Some("Joe"))
           taskDone <- t.isDone.delay(1.seconds)
           cancelDone <- c.isDone.delay(1.seconds)
@@ -90,7 +90,7 @@ object QTest extends TestSuite {
       CancellableTaskQueue[String, Unit, String].use { ops =>
         for {
           e <- ZIO.environment[Clock]
-          _ <- ops.put("k", ZIO.succeed("x").delay(1.second).provide(e).uninterruptible)
+          _ <- ops.add("k", ZIO.succeed("x").delay(1.second).provide(e).uninterruptible)
           c  <- ops.cancel("k", Some("Joe"))
           c1  <- ops.cancel("k", Some("xxx"))
           cancelDone <- c.await
@@ -105,7 +105,7 @@ object QTest extends TestSuite {
       CancellableTaskQueue[String, Unit, String].use { ops =>
         for {
           e <- ZIO.environment[Clock]
-          _ <- ops.put("k", ZIO.succeed("x").delay(1.second).tap(_ => IO.never.interruptible).provide(e).uninterruptible)
+          _ <- ops.add("k", ZIO.succeed("x").delay(1.second).tap(_ => IO.never.interruptible).provide(e).uninterruptible)
           c  <- ops.cancel("k", Some("Joe"))
           c1  <- ops.cancel("k", Some("xxx"))
           c2  <- ops.cancel("k", Some("yyy"))
@@ -126,9 +126,9 @@ object QTest extends TestSuite {
 
           shutdown <- Ref.make[Boolean](false)
 
-          _ <- ops.put("k", runUntilShutdown(shutdown).provide(e).uninterruptible)
+          _ <- ops.add("k", runUntilShutdown(shutdown).provide(e).uninterruptible)
 
-          _ <- ops.put("z", IO.never)
+          _ <- ops.add("z", IO.never)
           zc  <- ops.cancel("z", Some("Joe"))
           zCancelDone <- zc.await
           _ = assertInstanceOf[Cancelled](zCancelDone)()
@@ -137,7 +137,7 @@ object QTest extends TestSuite {
           _  <- ops.cancel("k", Some("Foo"))
           _  <- ops.cancel("k", Some("xxx"))
 
-          _ <- ops.put("z", IO.never)
+          _ <- ops.add("z", IO.never)
           zc1  <- ops.cancel("z", Some("Joe"))
           zCancelDone1 <- zc1.await
           _ = assertInstanceOf[Cancelled](zCancelDone1)()
@@ -152,7 +152,7 @@ object QTest extends TestSuite {
       CancellableTaskQueue[String, Unit, String].use { ops =>
         for {
           e <- ZIO.environment[Clock]
-          _ <- ops.put("k", ZIO.succeed("x").delay(1.second).provide(e))
+          _ <- ops.add("k", ZIO.succeed("x").delay(1.second).provide(e))
           k  <- ops.join("k")
           res <- k.await
           _ = assert(res == Done("x"))
@@ -166,9 +166,9 @@ object QTest extends TestSuite {
           e <- ZIO.environment[Clock]
           shutdown <- Ref.make[Boolean](false)
 
-          _ <- ops.put("k", runUntilShutdown(shutdown, "res").provide(e).uninterruptible)
-          _ <- ops.put("t1", UIO("r1"))
-          _ <- ops.put_("t2", UIO("r2"))
+          _ <- ops.add("k", runUntilShutdown(shutdown, "res").provide(e).uninterruptible)
+          _ <- ops.add("t1", UIO("r1"))
+          _ <- ops.add_("t2", UIO("r2"))
 
           t1  <- ops.join("t1")
           _ <- ops.cancel("t1")
@@ -191,10 +191,10 @@ object QTest extends TestSuite {
     test("get all registered task names")(
       CancellableTaskQueue[String, Unit, String].use { ops =>
         for {
-          _ <- ops.put_("t1", IO.never)
-          _ <- ops.put_("t2", IO.never)
-          _ <- ops.put_("t3", IO.never)
-          tasks <- ops.getRegisteredTaskNames
+          _ <- ops.add_("t1", IO.never)
+          _ <- ops.add_("t2", IO.never)
+          _ <- ops.add_("t3", IO.never)
+          tasks <- ops.getRegisteredTaskKeys
           _ = assert(tasks == Set("t1", "t2", "t3"))
         } yield ()
       }.runT
