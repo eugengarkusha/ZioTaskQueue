@@ -189,6 +189,7 @@ object CancellableTaskQueue {
       for{
        shutdown <-  ZManaged.fromEffect(Ref.make(false))
        cancelRequestedBy <- ZManaged.fromEffect(Ref.make[Option[String]](None))
+       // TODO: make this logic robust
        genNextId <-  ZManaged.fromEffect(
          UIO(new AtomicInteger(0))
            .map(idHolder =>  UIO(idHolder.getAndUpdate(nextId)))
