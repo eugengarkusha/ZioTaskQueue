@@ -106,18 +106,17 @@ object CancellableTaskQueue {
         case add: Add[K, E, V] =>
           if (keyStore.contains(add.key)) add.completeHook.traverse_(_.succeed(Duplicate)).as(state)
           else if (taskStore.size == Int.MaxValue) add.completeHook.traverse_(_.succeed(Rejected)).as(state)
-          else
-            IO.effectSuspendTotal {
-              val id = findId(
-                  lastAdddedId,
-                  v => !taskStore.contains(v),
-                  "cannot find vacant id in non-full taskStore"
-              )
+          else {
+            val id = findId(
+                lastAdddedId,
+                v => !taskStore.contains(v),
+                "cannot find vacant id in non-full taskStore"
+            )
 
-              inProgress
-                .orElseIO(runTask(id, add).map(t => Some(id -> t)))
-                .map(state.copy(taskStore.updated(id, add), keyStore.updated(add.key, id), _, lastAdddedId = id))
-            }
+            inProgress
+              .orElseIO(runTask(id, add).map(t => Some(id -> t)))
+              .map(state.copy(taskStore.updated(id, add), keyStore.updated(add.key, id), _, lastAdddedId = id))
+          }
 
         case Cancel(key, cancelHookOpt, label) =>
           keyStore.get(key) match {
@@ -194,7 +193,9 @@ object CancellableTaskQueue {
                     taskStore.contains,
                     "cannot find next task in nonempty taskstore"
                 )
-                runTask(nextId, taskStore(nextId)).map(nextId -> _)
+                // Completed message is sent from the inProgress fiber after the task is completed. Waiting for this fiber to complete before running next task.
+                inProgress.traverse_(_._2.join) *>
+                  runTask(nextId, taskStore(nextId)).map(nextId -> _)
               }
               .map(state.copy(taskStore - id, keyStore - key, _, None))
       }

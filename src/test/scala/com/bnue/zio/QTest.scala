@@ -235,8 +235,8 @@ object QTest extends TestSuite {
 
     test("naive monkey test (no assertion errors, queue terminates properly)") {
       def opsFuncs(c: Clock): List[Ops[String, Unit, String] => ZIO[Any, Nothing, Any]] = {
-        val p    = "abcd".toSeq.permutations.map(_.unwrap).toList
-        val keys = Random.shuffle((0 to 100).map(_ => p).reduce(_ ++ _))
+        val p    = "abcde".toSeq.permutations.map(_.unwrap).toList
+        val keys = Random.shuffle((0 to 150).map(_ => p).reduce(_ ++ _))
         keys.map(
             k =>
               (o: Ops[String, Unit, String]) =>
@@ -255,7 +255,7 @@ object QTest extends TestSuite {
           for {
             e <- ZIO.environment[Clock]
             _ <- IO.traversePar(opsFuncs(e))(_(ops))
-//            _ <- UIO(println(res.mkString("\n")))
+//           _ <- UIO(println(res.mkString("\n")))
           } yield ()
         }
         .runT()
