@@ -15,6 +15,7 @@ Implementation of the cancellable tasks queue using ZIO
 - Failed(errors)  
 - Died(defects)  
 - Duplicate  
+- Rejected  
 
 #### Cancellation/Join result types: 
 
