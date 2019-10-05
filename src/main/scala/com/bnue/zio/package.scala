@@ -12,6 +12,10 @@ package object zio {
       v
     } catch { case NonFatal(t) => throw new AssertionError(msg + "." + t) }
   implicit class OptionOps[V](val o: Option[V]) extends AnyVal {
-    def orElseIO[R, E](alt: ZIO[R, E, Option[V]]): ZIO[R, E, Option[V]] = if (o.isEmpty) alt else IO.succeed(o)
+    def orElseIO[R, E](alt: => ZIO[R, E, Option[V]]): ZIO[R, E, Option[V]] = if (o.isEmpty) alt else IO.succeed(o)
+  }
+
+  implicit class IoOps(val z: ZIO.type) extends AnyVal {
+    def optional[R, E, V](b: Boolean)(z: => ZIO[R, E, V]): ZIO[R, E, Option[V]] = if (b) z.map(Some(_)) else IO.succeed(None)
   }
 }

@@ -233,18 +233,19 @@ object QTest extends TestSuite {
           .runT()
     )
 
-    test("naive monkey test (no assertion errors , queue terminates properly)") {
+    test("naive monkey test (no assertion errors, queue terminates properly)") {
       def opsFuncs(c: Clock): List[Ops[String, Unit, String] => ZIO[Any, Nothing, Any]] = {
         val p    = "abcd".toSeq.permutations.map(_.unwrap).toList
         val keys = Random.shuffle((0 to 100).map(_ => p).reduce(_ ++ _))
         keys.map(
             k =>
               (o: Ops[String, Unit, String]) =>
-                Random.nextInt(4) match {
-                  case 0 => o.add_(k, IO.succeed("done").delay(Random.nextInt(100).millis).provide(c))
-                  case 1 => o.cancel_(k)
+                Random.nextInt(5) match {
+                  case 0 => o.add(k, IO.succeed("done").delay(Random.nextInt(100).millis).provide(c))
+                  case 1 => o.cancel(k)
                   case 2 => o.getRegisteredTaskKeys
                   case 3 => o.join(k)
+                  case 4 => o.add(k, IO.dieMessage("boom").delay(Random.nextInt(100).millis).provide(c))
                 }
         )
       }
@@ -253,7 +254,8 @@ object QTest extends TestSuite {
         .use { ops =>
           for {
             e   <- ZIO.environment[Clock]
-            res <- IO.traversePar(opsFuncs(e))(_(ops))
+            _ <- IO.traversePar(opsFuncs(e))(_(ops))
+//            _ <- UIO(println(res.mkString("\n")))
           } yield ()
         }
         .runT()

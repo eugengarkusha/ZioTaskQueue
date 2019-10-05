@@ -91,23 +91,6 @@ object CancellableTaskQueue {
           .fork
           .map(id -> _)
 
-    def switchToNextTask(id: Int): UIO[Option[(Int, Fiber[Nothing, TaskStatus[E, V]])]] =
-      if (taskStore.size > 1) {
-
-        val (nid, nextTask) = (0 until Int.MaxValue)
-          .view
-          .flatMap { i =>
-            val nid = nextId(id + i)
-            taskStore.get(nid).map(nid -> _)
-          }
-          .headOption
-          .ensuring(_.isDefined, "cannot find next task in nonempty taskstore")
-          .get
-
-        runTask(nid, nextTask).map(Some(_))
-
-      } else IO.succeed(None)
-
     q.take
       .flatMap {
 
@@ -187,15 +170,27 @@ object CancellableTaskQueue {
         case GetKeys(p) => p.succeed(keyStore.keySet).as(state)
 
         case Completed(id, key) =>
+
+          def findNextTask: (Int, Add[K, E, V]) =
+            (0 until Int.MaxValue)
+              .view
+              .flatMap { i =>
+                val nid = nextId(id + i)
+                taskStore.get(nid).map(nid -> _)
+              }
+              .headOption
+              .ensuring(_.isDefined, "cannot find next task in nonempty taskstore")
+              .get
+
           cancelInProgress.traverse_ {
             case (cid, task) =>
               assert(cid == id, s"Completed key '$key' does not match key of the task being cancelled '$cid'")
               //guarantees that cancelHookOpt will be fulfilled before fiber gets garbage collected
               task.join
           } *>
-            switchToNextTask(id)
-              .as(state.copy(taskStore - id, keyStore - key, None, None))
-
+            ZIO
+              .optional(taskStore.size > 1)((runTask _).tupled(findNextTask))
+              .map(state.copy(taskStore - id, keyStore - key, _, None))
       }
       .uninterruptible
       .flatMap(
