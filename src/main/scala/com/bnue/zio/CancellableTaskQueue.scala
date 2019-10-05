@@ -31,7 +31,8 @@ object CancellableTaskQueue {
       taskStore: Map[Int, Add[K, E, V]],
       keyStore: Map[K, Int],
       inProgress: Option[(Int, Fiber[Nothing, TaskStatus[E, V]])],
-      cancelInProgress: Option[(Int, Fiber[Nothing, TaskStatus[E, V]])]
+      cancelInProgress: Option[(Int, Fiber[Nothing, TaskStatus[E, V]])],
+      lastAdddedId: Int
   )
 
   private def nextId(id: Int): Int = (id + 1) % Int.MaxValue
@@ -62,7 +63,6 @@ object CancellableTaskQueue {
 
   def runProcessing[K, E, V](
       q: Queue[Msg[K, E, V]],
-      genNextId: () => Int,
       shutdown: Ref[Boolean],
       cancelRequestedBy: Ref[Option[String]],
       state: State[K, E, V]
@@ -93,19 +93,21 @@ object CancellableTaskQueue {
 
     q.take
       .flatMap {
-
         case add: Add[K, E, V] =>
           if (keyStore.contains(add.key)) add.completeHook.traverse_(_.succeed(Duplicate)).as(state)
           else if (taskStore.size == Int.MaxValue) add.completeHook.traverse_(_.succeed(Rejected)).as(state)
           else
             IO.effectSuspendTotal {
-              var id = genNextId()
-              while (taskStore.contains(id)) {
-                id = genNextId()
-              }
+              val id =
+                (0 to Int.MaxValue)
+                  .iterator
+                  .map(i => nextId(lastAdddedId + i))
+                  .find(!taskStore.contains(_))
+                  .ensuring(_.isDefined, "cannot find vacant id in non-full taskStore")
+                  .get
               inProgress
                 .orElseIO(runTask(id, add).map(Some(_)))
-                .map(state.copy(taskStore.updated(id, add), keyStore.updated(add.key, id), _))
+                .map(state.copy(taskStore.updated(id, add), keyStore.updated(add.key, id), _, lastAdddedId = id))
             }
 
         case Cancel(key, cancelHookOpt, label) =>
@@ -170,7 +172,6 @@ object CancellableTaskQueue {
         case GetKeys(p) => p.succeed(keyStore.keySet).as(state)
 
         case Completed(id, key) =>
-
           def findNextTask: (Int, Add[K, E, V]) =
             (0 until Int.MaxValue)
               .view
@@ -200,7 +201,7 @@ object CancellableTaskQueue {
               .get
               .flatMap(
                   sd =>
-                    if (!sd) runProcessing(q, genNextId, shutdown, cancelRequestedBy, state)
+                    if (!sd) runProcessing(q, shutdown, cancelRequestedBy, state)
                     else {
                       inProgress.traverse_(_._2.interrupt) *>
                         //guarantees that cancelHookOpt will be fulfilled
@@ -216,15 +217,6 @@ object CancellableTaskQueue {
       shutdown          <- ZManaged.fromEffect(Ref.make(false))
       cancelRequestedBy <- ZManaged.fromEffect(Ref.make[Option[String]](None))
 
-      genNextId = {
-        // no parallel access to this var
-        @volatile var id = -1
-        () => {
-          id = nextId(id)
-          id
-        }
-      }
-
       q <- ZManaged.make(Queue.unbounded[Msg[K, E, V]])(
               v =>
                 v.shutdownAndTakeAll
@@ -237,7 +229,7 @@ object CancellableTaskQueue {
           )
 
       ops = new Ops[K, E, V](q)
-      _ <- ZManaged.make(runProcessing[K, E, V](q, genNextId, shutdown, cancelRequestedBy, State(Map.empty, Map.empty, None, None)).fork)(
+      _ <- ZManaged.make(runProcessing[K, E, V](q, shutdown, cancelRequestedBy, State(Map.empty, Map.empty, None, None, 0)).fork)(
               t =>
                 shutdown.set(true) *>
                   // waking up in case if q is empty and runProcessing is locked on '.take'
