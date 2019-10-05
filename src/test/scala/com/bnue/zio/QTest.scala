@@ -1,6 +1,6 @@
 package com.bnue.zio
 
-import com.bnue.zio.CancellableTaskQueue.{Cancelled, Done}
+import com.bnue.zio.CancellableTaskQueue.{Cancelled, Done, Ops}
 import utest._
 import zio.clock.Clock
 import zio.{RIO, _}
@@ -9,8 +9,8 @@ import cats.implicits._
 import zio.Exit.Success
 import zio.interop.catz._
 import scala.language.higherKinds
-
 import scala.reflect.ClassTag
+import scala.util.Random
 
 object QTest extends TestSuite {
   val rt = new DefaultRuntime {}
@@ -232,6 +232,32 @@ object QTest extends TestSuite {
           }
           .runT()
     )
+
+    test("naive monkey test (no assertion errors , queue terminates properly)") {
+      def opsFuncs(c: Clock): List[Ops[String, Unit, String] => ZIO[Any, Nothing, Any]] = {
+        val p    = "abcd".toSeq.permutations.map(_.unwrap).toList
+        val keys = Random.shuffle((0 to 100).map(_ => p).reduce(_ ++ _))
+        keys.map(
+            k =>
+              (o: Ops[String, Unit, String]) =>
+                Random.nextInt(4) match {
+                  case 0 => o.add_(k, IO.succeed("done").delay(Random.nextInt(100).millis).provide(c))
+                  case 1 => o.cancel_(k)
+                  case 2 => o.getRegisteredTaskKeys
+                  case 3 => o.join(k)
+                }
+        )
+      }
+
+      CancellableTaskQueue[String, Unit, String]
+        .use { ops =>
+          for {
+            e   <- ZIO.environment[Clock]
+            res <- IO.traversePar(opsFuncs(e))(_(ops))
+          } yield ()
+        }
+        .runT()
+    }
 
   }
 }
