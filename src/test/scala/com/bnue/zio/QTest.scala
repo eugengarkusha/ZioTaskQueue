@@ -253,7 +253,7 @@ object QTest extends TestSuite {
       CancellableTaskQueue[String, Unit, String]
         .use { ops =>
           for {
-            e   <- ZIO.environment[Clock]
+            e <- ZIO.environment[Clock]
             _ <- IO.traversePar(opsFuncs(e))(_(ops))
 //            _ <- UIO(println(res.mkString("\n")))
           } yield ()

@@ -5,6 +5,8 @@ import zio.interop.catz._
 import cats.implicits._
 import zio.Exit.{Failure, Success}
 
+import scala.annotation.tailrec
+
 object CancellableTaskQueue {
   type CompleteHook[E, V] = Promise[Nothing, TaskCompletionStatus[E, V]]
   type CancelHook[E, V]   = Promise[Nothing, TaskCancelStatus[E, V]]
@@ -34,8 +36,6 @@ object CancellableTaskQueue {
       cancelInProgress: Option[(Int, Fiber[Nothing, TaskStatus[E, V]])],
       lastAdddedId: Int
   )
-
-  private def nextId(id: Int): Int = (id + 1) % Int.MaxValue
 
   // TODO: support parallelism
   // TODO: create looser version of this that captures V on put and completeHook, loose V in cancel
@@ -77,7 +77,18 @@ object CancellableTaskQueue {
         else Died(cause.defects)
     }
 
-    def runTask(id: Int, add: Add[K, E, V]): UIO[(Int, Fiber[Nothing, TaskStatus[E, V]])] =
+    def findId(startId: Int, f: Int => Boolean, msg: String): Int = {
+      @tailrec
+      def find(currentId: Int): Int = {
+        val rolledId = currentId % Int.MaxValue
+        assert(startId != rolledId, msg)
+        if (f(rolledId)) rolledId
+        else find(rolledId + 1)
+      }
+      find(startId + 1)
+    }
+
+    def runTask(id: Int, add: Add[K, E, V]): UIO[Fiber[Nothing, TaskStatus[E, V]]] =
       IO.whenM(inProgress.fold(IO.succeed(false))(_._2.poll.map(_.isEmpty)))(
           IO.dieMessage("trying to start new task when something is in progress")
       ) *>
@@ -89,7 +100,6 @@ object CancellableTaskQueue {
           // Completed is guaranteed to be added to queue before hook succeeds and user that waits for hook will only be able to observe the state as it is AFTER Completed is processed
           .tap(status => q.offer(Completed(id, add.key)) *> add.completeHook.traverse_(_.succeed(status)))
           .fork
-          .map(id -> _)
 
     q.take
       .flatMap {
@@ -98,15 +108,14 @@ object CancellableTaskQueue {
           else if (taskStore.size == Int.MaxValue) add.completeHook.traverse_(_.succeed(Rejected)).as(state)
           else
             IO.effectSuspendTotal {
-              val id =
-                (0 to Int.MaxValue)
-                  .iterator
-                  .map(i => nextId(lastAdddedId + i))
-                  .find(!taskStore.contains(_))
-                  .ensuring(_.isDefined, "cannot find vacant id in non-full taskStore")
-                  .get
+              val id = findId(
+                  lastAdddedId,
+                  v => !taskStore.contains(v),
+                  "cannot find vacant id in non-full taskStore"
+              )
+
               inProgress
-                .orElseIO(runTask(id, add).map(Some(_)))
+                .orElseIO(runTask(id, add).map(t => Some(id -> t)))
                 .map(state.copy(taskStore.updated(id, add), keyStore.updated(add.key, id), _, lastAdddedId = id))
             }
 
@@ -172,17 +181,6 @@ object CancellableTaskQueue {
         case GetKeys(p) => p.succeed(keyStore.keySet).as(state)
 
         case Completed(id, key) =>
-          def findNextTask: (Int, Add[K, E, V]) =
-            (0 until Int.MaxValue)
-              .view
-              .flatMap { i =>
-                val nid = nextId(id + i)
-                taskStore.get(nid).map(nid -> _)
-              }
-              .headOption
-              .ensuring(_.isDefined, "cannot find next task in nonempty taskstore")
-              .get
-
           cancelInProgress.traverse_ {
             case (cid, task) =>
               assert(cid == id, s"Completed key '$key' does not match key of the task being cancelled '$cid'")
@@ -190,7 +188,14 @@ object CancellableTaskQueue {
               task.join
           } *>
             ZIO
-              .optional(taskStore.size > 1)((runTask _).tupled(findNextTask))
+              .optional(taskStore.size > 1) {
+                val nextId = findId(
+                    id,
+                    taskStore.contains,
+                    "cannot find next task in nonempty taskstore"
+                )
+                runTask(nextId, taskStore(nextId)).map(nextId -> _)
+              }
               .map(state.copy(taskStore - id, keyStore - key, _, None))
       }
       .uninterruptible
