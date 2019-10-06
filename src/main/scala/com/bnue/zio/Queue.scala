@@ -5,13 +5,12 @@ import cats.implicits._
 import zio.interop.catz._
 
 object Queue {
-  private val ssz = 1000
-  def unbounded[A]: UIO[Queue[A]] =
-    (zio.Queue.unbounded[A], Semaphore.make(ssz), Ref.make(false)).mapN((new Queue[A](_, _, ssz, _)))
+  def wrap[A](q: zio.Queue[A], numberOfPermits: Int = Int.MaxValue): UIO[Queue[A]] =
+    (Semaphore.make(numberOfPermits), Ref.make(false)).mapN((new Queue[A](q, _, numberOfPermits, _)))
 }
 
 // ordinary ZIO queue with additional 'shutdownAndTakeAll' method.
-class Queue[A](q: zio.Queue[A], s: Semaphore, ssz: Int, shutdownFlag: Ref[Boolean]) extends ZQueue[Any, Nothing, Any, Nothing, A, A] {
+class Queue[A](q: zio.Queue[A], s: Semaphore, numberOfPermits: Int, shutdownFlag: Ref[Boolean]) extends ZQueue[Any, Nothing, Any, Nothing, A, A] {
   private def withPermit[T](f: UIO[T]): UIO[T] =
     cond(shutdownFlag.get)(UIO.interrupt, s.withPermit(f))
   override def take: ZIO[Any, Nothing, A] = withPermit(q.take)
@@ -34,5 +33,5 @@ class Queue[A](q: zio.Queue[A], s: Semaphore, ssz: Int, shutdownFlag: Ref[Boolea
 
   override def shutdown: UIO[Unit] = withPermit(q.shutdown)
 
-  def shutdownAndTakeAll: UIO[List[A]] = shutdownFlag.set(true) *> s.withPermits(ssz)(q.takeAll)
+  def shutdownAndTakeAll: UIO[List[A]] = shutdownFlag.set(true) *> s.withPermits(numberOfPermits)(q.takeAll)
 }

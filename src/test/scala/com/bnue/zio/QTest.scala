@@ -1,6 +1,6 @@
 package com.bnue.zio
 
-import com.bnue.zio.CancellableTaskQueue.{Cancelled, Done, Ops}
+import com.bnue.zio.CancellableTaskQueue.{Cancelled, Done, NotFound, Ops}
 import utest._
 import zio.clock.Clock
 import zio.{RIO, _}
@@ -8,6 +8,8 @@ import zio.duration._
 import cats.implicits._
 import zio.Exit.Success
 import zio.interop.catz._
+import zio.stream.ZStream
+
 import scala.language.higherKinds
 import scala.reflect.ClassTag
 import scala.util.Random
@@ -48,7 +50,7 @@ object QTest extends TestSuite {
   val tests = Tests {
 
     test("put, cancel, doneCB, cancelCB")(
-        CancellableTaskQueue[String, Unit, String]
+        CancellableTaskQueue[String, Unit, String]()
           .use { ops =>
             for {
               x  <- ops.add("k", ZIO.never.map(_ => "never")).map(_.toString).race(UIO.succeed("win").delay(1.seconds))
@@ -63,7 +65,7 @@ object QTest extends TestSuite {
     test("shutdown: inProgress tasks are interrupted. Escaped Ops is interrupting all calls")(
         for {
           interruptedRef <- Ref.make(false)
-          escapedOps <- CancellableTaskQueue[String, Unit, String].use { ops =>
+          escapedOps <- CancellableTaskQueue[String, Unit, String]().use { ops =>
                          ops
                            .add(
                                "k",
@@ -81,7 +83,7 @@ object QTest extends TestSuite {
     )
 
     test("uninterruptible tasks are not cancellable, and are blocking the finalizers")(
-        CancellableTaskQueue[String, Unit, String]
+        CancellableTaskQueue[String, Unit, String]()
           .use { ops =>
             for {
               t          <- ops.add("k", ZIO.never.map(_ => "never").uninterruptible).fork
@@ -103,7 +105,7 @@ object QTest extends TestSuite {
     )
 
     test("cancel hooks return Done on uninterruptible tasks and all cancel hooks are satisfied")(
-        CancellableTaskQueue[String, Unit, String]
+        CancellableTaskQueue[String, Unit, String]()
           .use { ops =>
             for {
               e           <- ZIO.environment[Clock]
@@ -123,7 +125,7 @@ object QTest extends TestSuite {
     )
 
     test("all cancel hooks are satisfied with the label of the first cancel call")(
-        CancellableTaskQueue[String, Unit, String]
+        CancellableTaskQueue[String, Unit, String]()
           .use { ops =>
             for {
               e           <- ZIO.environment[Clock]
@@ -138,15 +140,15 @@ object QTest extends TestSuite {
                 assertInstanceOf[Cancelled] |>
                 (c => assert(c.label.contains("Joe")))
 
-              _ = assert(cancelDone == cancelDone1)
-              _ = assert(cancelDone == cancelDone2)
+              _ = assert(cancelDone1 == cancelDone || cancelDone1 == Success(NotFound))
+              _ = assert(cancelDone2 == cancelDone || cancelDone2 == Success(NotFound))
             } yield ()
           }
           .runT()
     )
 
     test("can add and remove tasks while active task is running (also when it is in process of cancellation)")(
-        CancellableTaskQueue[String, Unit, String]
+        CancellableTaskQueue[String, Unit, String]()
           .use { ops =>
             for {
               e <- ZIO.environment[Clock]
@@ -179,7 +181,7 @@ object QTest extends TestSuite {
     )
 
     test("join by key simple case")(
-        CancellableTaskQueue[String, Unit, String].use { ops =>
+        CancellableTaskQueue[String, Unit, String]().use { ops =>
           for {
             e   <- ZIO.environment[Clock]
             _   <- ops.add("k", ZIO.succeed("x").delay(1.second).provide(e)).fork
@@ -190,7 +192,7 @@ object QTest extends TestSuite {
     )
 
     test("join tasks which are not yet running")(
-        CancellableTaskQueue[String, Unit, String]
+        CancellableTaskQueue[String, Unit, String]()
           .use { ops =>
             for {
               e        <- ZIO.environment[Clock]
@@ -220,7 +222,7 @@ object QTest extends TestSuite {
     )
 
     test("get all registered task names")(
-        CancellableTaskQueue[String, Unit, String]
+        CancellableTaskQueue[String, Unit, String]()
           .use { ops =>
             for {
               _     <- ops.add_("t1", IO.never)
@@ -234,27 +236,26 @@ object QTest extends TestSuite {
     )
 
     test("naive monkey test (no assertion errors, queue terminates properly)") {
-      def opsFuncs(c: Clock): List[Ops[String, Unit, String] => ZIO[Any, Nothing, Any]] = {
-        val p    = "abcde".toSeq.permutations.map(_.unwrap).toList
-        val keys = Random.shuffle((0 to 150).map(_ => p).reduce(_ ++ _))
-        keys.map(
-            k =>
-              (o: Ops[String, Unit, String]) =>
-                Random.nextInt(5) match {
-                  case 0 => o.add(k, IO.succeed("done").delay(Random.nextInt(100).millis).provide(c))
-                  case 1 => o.cancel(k)
-                  case 2 => o.getRegisteredTaskKeys
-                  case 3 => o.join(k)
-                  case 4 => o.add(k, IO.dieMessage("boom").delay(Random.nextInt(100).millis).provide(c))
-                }
-        )
+      val nextKey = {
+        val perms   = "abcd".toSeq.permutations.map(_.unwrap).toArray
+        val permsSz = perms.length
+        () => perms(Random.nextInt(permsSz))
       }
+      def invokeOp(c: Clock, k: String, o: Ops[String, Unit, String]): ZIO[Any, Nothing, Any] =
+        Random.nextInt(5) match {
+          case 0 => o.add(k, IO.succeed("done").delay(Random.nextInt(50).millis).provide(c))
+          case 1 => o.add(k, IO.dieMessage("boom").delay(Random.nextInt(50).millis).provide(c))
+          case 2 => o.cancel(k)
+          case 3 => o.getRegisteredTaskKeys
+          case 4 => o.join(k)
+        }
 
-      CancellableTaskQueue[String, Unit, String]
+      CancellableTaskQueue[String, Unit, String](100, 10)
         .use { ops =>
           for {
             e <- ZIO.environment[Clock]
-            _ <- IO.traversePar(opsFuncs(e))(_(ops))
+            // need a bit of paralellism here because we use 'fiber-blocking' operations (e.g.: add, cancel vs add_, cancel_)
+            _ <- ZStream.repeatEffect(UIO(nextKey())).take(5000).mapMParUnordered(30)(invokeOp(e, _, ops)).runDrain
 //           _ <- UIO(println(res.mkString("\n")))
           } yield ()
         }

@@ -65,6 +65,7 @@ object CancellableTaskQueue {
       q: Queue[Msg[K, E, V]],
       shutdown: Ref[Boolean],
       cancelRequestedBy: Ref[Option[String]],
+      taskStoreSize: Int,
       state: State[K, E, V]
   ): UIO[Unit] = {
     import state._
@@ -77,13 +78,14 @@ object CancellableTaskQueue {
         else Died(cause.defects)
     }
 
-    def findId(startId: Int, f: Int => Boolean, msg: String): Int = {
+    def findId(startId: Int, f: Int => Boolean, msg: => String): Int = {
       @tailrec
       def find(currentId: Int): Int = {
-        val rolledId = currentId % Int.MaxValue
-        assert(startId != rolledId, msg)
+        val rolledId = currentId % taskStoreSize
         if (f(rolledId)) rolledId
-        else find(rolledId + 1)
+        //  startId == rolledId means that we rolled over the whole ids space
+        else if (startId != rolledId) find(rolledId + 1)
+        else throw new AssertionError(msg)
       }
       find(startId + 1)
     }
@@ -105,7 +107,7 @@ object CancellableTaskQueue {
       .flatMap {
         case add: Add[K, E, V] =>
           if (keyStore.contains(add.key)) add.completeHook.traverse_(_.succeed(Duplicate)).as(state)
-          else if (taskStore.size == Int.MaxValue) add.completeHook.traverse_(_.succeed(Rejected)).as(state)
+          else if (taskStore.size == taskStoreSize) add.completeHook.traverse_(_.succeed(Rejected)).as(state)
           else {
             val id = findId(
                 lastAdddedId,
@@ -200,42 +202,49 @@ object CancellableTaskQueue {
               .map(state.copy(taskStore - id, keyStore - key, _, None))
       }
       .uninterruptible
-      .flatMap(
-          state =>
-            // controlled shutdown: this code can be interrupted only before or after message extraction+processing
-            shutdown
-              .get
-              .flatMap(
-                  sd =>
-                    if (!sd) runProcessing(q, shutdown, cancelRequestedBy, state)
-                    else {
-                      inProgress.traverse_(_._2.interrupt) *>
-                        //guarantees that cancelHookOpt will be fulfilled
-                        cancelInProgress.traverse_(_._2.join) *>
-                        UIO.traverse_(taskStore)(_._2.completeHook.traverse_(_.interrupt))
-                    }
-              )
-      )
+      .flatMap { state =>
+        // controlled shutdown: this code can be interrupted only before or after message extraction+processing
+        shutdown
+          .get
+          .flatMap(
+              sd =>
+                if (!sd) runProcessing(q, shutdown, cancelRequestedBy, taskStoreSize, state)
+                else {
+                  inProgress.traverse_(_._2.interrupt) *>
+                    //guarantees that cancelHookOpt will be fulfilled
+                    cancelInProgress.traverse_(_._2.join) *>
+                    UIO.traverse_(taskStore)(_._2.completeHook.traverse_(_.interrupt))
+                }
+          )
+      }
   }
 
-  def apply[K, E, V]: ZManaged[Any, Nothing, Ops[K, E, V]] =
+  def apply[K, E, V](commandQueueCapacity: Int = 1024, taskStoreCapacity: Int = Int.MaxValue): ZManaged[Any, Nothing, Ops[K, E, V]] =
     for {
       shutdown          <- ZManaged.fromEffect(Ref.make(false))
       cancelRequestedBy <- ZManaged.fromEffect(Ref.make[Option[String]](None))
 
-      q <- ZManaged.make(Queue.unbounded[Msg[K, E, V]])(
-              v =>
-                v.shutdownAndTakeAll
-                  .flatMap(_.traverse_ {
-                    case Add(_, _, hook)                             => hook.traverse_(_.interrupt)
-                    case Cancel(_, hook, _)                          => hook.traverse_(_.interrupt)
-                    case Join(_, hook)                               => hook.interrupt
-                    case _: Completed[_, _, _] | _: GetKeys[_, _, _] => UIO.unit
-                  })
-          )
+      commandQueue <- ZManaged.make(zio.Queue.bounded[Msg[K, E, V]](commandQueueCapacity).flatMap(Queue.wrap(_)))(
+                         v =>
+                           v.shutdownAndTakeAll
+                             .flatMap(_.traverse_ {
+                               case Add(_, _, hook)                             => hook.traverse_(_.interrupt)
+                               case Cancel(_, hook, _)                          => hook.traverse_(_.interrupt)
+                               case Join(_, hook)                               => hook.interrupt
+                               case _: Completed[_, _, _] | _: GetKeys[_, _, _] => UIO.unit
+                             })
+                     )
 
-      ops = new Ops[K, E, V](q)
-      _ <- ZManaged.make(runProcessing[K, E, V](q, shutdown, cancelRequestedBy, State(Map.empty, Map.empty, None, None, 0)).fork)(
+      ops = new Ops[K, E, V](commandQueue)
+      _ <- ZManaged.make(
+              runProcessing[K, E, V](
+                  commandQueue,
+                  shutdown,
+                  cancelRequestedBy,
+                  taskStoreCapacity,
+                  State(Map.empty, Map.empty, None, None, -1)
+              ).fork
+          )(
               t =>
                 shutdown.set(true) *>
                   // waking up in case if q is empty and runProcessing is locked on '.take'
