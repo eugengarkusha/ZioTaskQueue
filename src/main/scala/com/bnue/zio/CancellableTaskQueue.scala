@@ -155,7 +155,7 @@ object CancellableTaskQueue {
           }
         case Join(key, joinHook) =>
           // Dirty hack to save a bit of runtime overhead: hooks are under control of this library and we '_know_' that Duplicate message cannot appear at this stage
-          // To do this in type safe manner we'd have to put 2 Promises into 'Add' msg: 1) HookStatus, 2)Duplicate.type and race between them. This way we could ensure that duplicte msg never shows up in this method.
+          // To do this in type safe manner we'd have to put 2 Promises into 'Add' msg: 1) TaskStatus, 2)Duplicate.type and race between them. This way we could ensure that duplicate msg never shows up in this method.
           val awaitAndTrimForbiddenMsgs: CompleteHook[E, V] => UIO[TaskStatus[E, V]] =
             _.await.flatMap {
               case t @ (Duplicate | Rejected) => IO.dieMessage(s"in progress task is completed with '$t'")
