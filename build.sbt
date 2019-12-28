@@ -45,10 +45,10 @@ scalacOptions ++= Seq(
 
 libraryDependencies ++= Seq(
   "dev.zio" %% "zio" % "1.0.0-RC11-1",
-  "dev.zio" %% "zio-interop-cats" % "2.0.0.0-RC2",
-  "dev.zio" %% "zio-streams" % "1.0.0-RC11-1",
-  "org.typelevel" %% "cats-effect" % "2.0.0-RC1",
-  "org.typelevel" %% "cats-core" % "2.0.0-RC1",
+  "dev.zio" %% "zio-interop-cats" % "2.0.0.0-RC10",
+  "dev.zio" %% "zio-streams" % "1.0.0-RC17",
+  "org.typelevel" %% "cats-effect" % "2.0.0",
+  "org.typelevel" %% "cats-core" % "2.0.0",
   "com.lihaoyi" %% "utest" % "0.7.1" % "test"
 )
 

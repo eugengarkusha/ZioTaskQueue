@@ -126,7 +126,7 @@ object CancellableTaskQueue {
             case Some(id) =>
               cancelInProgress match {
                 // when cancelInprogress fiber is completed Completed msg is guaranteed to be in the queue user will always see the proper state
-                case Some(`id` -> fiber) => cancelHookOpt.traverse_(_.complete(fiber.join)).as(state)
+                case Some(`id` -> fiber) => cancelHookOpt.traverse_(_.completeWith(fiber.join)).as(state)
                 case _ =>
                   inProgress match {
                     case Some(`id` -> fiber) =>
@@ -141,7 +141,7 @@ object CancellableTaskQueue {
                           .flatMap(
                               interruptFiber =>
                                 cancelHookOpt
-                                  .traverse_(_.complete(interruptFiber.join))
+                                  .traverse_(_.completeWith(interruptFiber.join))
                                   .as(state.copy(cancelInProgress = Some(id -> interruptFiber)))
                           )
                     case _ =>
@@ -165,15 +165,15 @@ object CancellableTaskQueue {
             case None => joinHook.succeed(NotFound).as(state)
             case Some(id) =>
               inProgress match {
-                case Some((`id`, fiber)) => joinHook.complete(fiber.join).as(state)
+                case Some((`id`, fiber)) => joinHook.completeWith(fiber.join).as(state)
                 case _ =>
                   val add = unsafe(taskStore(id))("key-id is not in sync")
                   add.completeHook match {
-                    case Some(completeHook) => joinHook.complete(awaitAndTrimForbiddenMsgs(completeHook)).as(state)
+                    case Some(completeHook) => joinHook.completeWith(awaitAndTrimForbiddenMsgs(completeHook)).as(state)
                     case None =>
                       Promise
                         .make[Nothing, TaskCompletionStatus[E, V]]
-                        .tap(awaitAndTrimForbiddenMsgs.andThen(joinHook.complete))
+                        .tap(awaitAndTrimForbiddenMsgs.andThen(joinHook.completeWith))
                         .map(p => state.copy(taskStore.updated(id, add.copy(completeHook = Some(p)))))
                   }
               }

@@ -3,7 +3,7 @@ package com.bnue.zio
 import com.bnue.zio.CancellableTaskQueue.{Cancelled, Done, NotFound, Ops}
 import utest._
 import zio.clock.Clock
-import zio.{RIO, _}
+import zio.{RIO, test => _, _}
 import zio.duration._
 import cats.implicits._
 import zio.Exit.Success
@@ -17,7 +17,7 @@ import scala.util.Random
 object QTest extends TestSuite {
   val rt = new DefaultRuntime {}
 
-  implicit class TT[R, T](val t: RIO[rt.Environment, T]) extends AnyVal {
+  implicit class TT[R, T](val t: RIO[ZEnv, T]) extends AnyVal {
     def runT() =
       rt.unsafeRunSync(
             t.run
