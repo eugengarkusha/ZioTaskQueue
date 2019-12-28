@@ -171,10 +171,10 @@ object CancellableTaskQueue {
                   add.completeHook match {
                     case Some(completeHook) => joinHook.completeWith(awaitAndTrimForbiddenMsgs(completeHook)).as(state)
                     case None =>
-                      Promise
-                        .make[Nothing, TaskCompletionStatus[E, V]]
-                        .tap(awaitAndTrimForbiddenMsgs.andThen(joinHook.completeWith))
-                        .map(p => state.copy(taskStore.updated(id, add.copy(completeHook = Some(p)))))
+                      for {
+                        completeHook <- Promise.make[Nothing, TaskCompletionStatus[E, V]]
+                        _            <- joinHook.completeWith(awaitAndTrimForbiddenMsgs(completeHook))
+                      } yield state.copy(taskStore = taskStore.updated(id, add.copy(completeHook = Some(completeHook))))
                   }
               }
           }
