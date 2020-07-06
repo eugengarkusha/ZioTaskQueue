@@ -7,6 +7,7 @@ import zio.{RIO, test => _, _}
 import zio.duration._
 import cats.implicits._
 import zio.Exit.Success
+import zio.internal.Platform
 import zio.interop.catz._
 import zio.stream.ZStream
 
@@ -15,7 +16,7 @@ import scala.reflect.ClassTag
 import scala.util.Random
 
 object QTest extends TestSuite {
-  val rt = new DefaultRuntime {}
+  val rt = Runtime.unsafeFromLayer(ZEnv.live, Platform.default)
 
   implicit class TT[R, T](val t: RIO[ZEnv, T]) extends AnyVal {
     def runT() =
@@ -94,7 +95,7 @@ object QTest extends TestSuite {
             } yield ()
           }
           //TODO: ensure that above assertion runs (eventually on var)
-          .fork
+          .forkDaemon
           .flatMap(
               _.poll
                 .map(_.isDefined)
@@ -114,11 +115,23 @@ object QTest extends TestSuite {
               c1          <- ops.cancel("k", Some("xxx")).fork
               cancelDone  <- c.await
               cancelDone1 <- c1.await
-              _ = assertSuccess(cancelDone) |>
-                assertInstanceOf[Done[_]] |>
-                (v => assert(v.result == "x"))
+              _           = assertSuccess(cancelDone) |> assertInstanceOf[Done[_]] |> (v => assert(v.result == "x"))
+              _           = assert(cancelDone == cancelDone1)
+            } yield ()
+          }
+          .runT()
+    )
 
-              _ = assert(cancelDone == cancelDone1)
+    test("interrupted tasks are obtaining 'Cancelled(None)' ststus")(
+        CancellableTaskQueue[String, Unit, String]()
+          .use { ops =>
+            for {
+              e          <- ZIO.environment[Clock]
+              _          <- ops.add("X", ZIO.succeed("x").delay(1.second).provide(e)).fork
+              cancelDone <- ops.cancel("X", Some("Joe")).run
+              addDone    <- ops.add("Y", ZIO.interrupt.delay(1.second).provide(e)).run
+              _          = assertSuccess(cancelDone) |> assertInstanceOf[Cancelled] |> (c => assert(c.label.contains("Joe")))
+              _          = assertSuccess(addDone) |> assertInstanceOf[Cancelled] |> (c => assert(c.label == None))
             } yield ()
           }
           .runT()
@@ -236,7 +249,7 @@ object QTest extends TestSuite {
     )
 
     test("naive monkey test (no assertion errors, queue terminates properly)") {
-      val nextKey = {
+      val nextKey: () => String = {
         val perms   = "abcd".toSeq.permutations.map(_.unwrap).toArray
         val permsSz = perms.length
         () => perms(Random.nextInt(permsSz))

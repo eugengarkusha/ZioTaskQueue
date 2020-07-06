@@ -66,9 +66,8 @@ object CancellableTaskQueue {
       shutdown: Ref[Boolean],
       cancelRequestedBy: Ref[Option[String]],
       taskStoreSize: Int,
-      state: State[K, E, V]
+      st: State[K, E, V]
   ): UIO[Unit] = {
-    import state._
 
     def toStatus(e: Exit[E, V], cancelReq: Option[String]): TaskStatus[E, V] = e match {
       case Success(v) => Done(v)
@@ -91,14 +90,14 @@ object CancellableTaskQueue {
     }
 
     def runTask(id: Int, add: Add[K, E, V]): UIO[Fiber[Nothing, TaskStatus[E, V]]] =
-      IO.whenM(inProgress.fold(IO.succeed(false))(_._2.poll.map(_.isEmpty)))(
+      IO.whenM(st.inProgress.fold(IO.succeed(false))(_._2.poll.map(_.isEmpty)))(
           IO.dieMessage("trying to start new task when something is in progress")
       ) *>
         add.task
         // whe whole execution block (message processing) where runTask is called is uninterruptible
           .interruptible
           .run
-          .flatMap(exit => cancelRequestedBy.get.map(toStatus(exit, _)))
+          .flatMap(exit => cancelRequestedBy.modify(cr => toStatus(exit, cr) -> None))
           // Completed is guaranteed to be added to queue before hook succeeds and user that waits for hook will only be able to observe the state as it is AFTER Completed is processed
           .tap(status => q.offer(Completed(id, add.key)) *> add.completeHook.traverse_(_.succeed(status)))
           .fork
@@ -106,29 +105,29 @@ object CancellableTaskQueue {
     q.take
       .flatMap {
         case add: Add[K, E, V] =>
-          if (keyStore.contains(add.key)) add.completeHook.traverse_(_.succeed(Duplicate)).as(state)
-          else if (taskStore.size == taskStoreSize) add.completeHook.traverse_(_.succeed(Rejected)).as(state)
+          if (st.keyStore.contains(add.key)) add.completeHook.traverse_(_.succeed(Duplicate)).as(st)
+          else if (st.taskStore.size == taskStoreSize) add.completeHook.traverse_(_.succeed(Rejected)).as(st)
           else {
             val id = findId(
-                lastAdddedId,
-                v => !taskStore.contains(v),
+                st.lastAdddedId,
+                v => !st.taskStore.contains(v),
                 "cannot find vacant id in non-full taskStore"
             )
 
-            inProgress
+            st.inProgress
               .orElseIO(runTask(id, add).map(t => Some(id -> t)))
-              .map(state.copy(taskStore.updated(id, add), keyStore.updated(add.key, id), _, lastAdddedId = id))
+              .map(inProg => st.copy(st.taskStore.updated(id, add), st.keyStore.updated(add.key, id), inProg, lastAdddedId = id))
           }
 
         case Cancel(key, cancelHookOpt, label) =>
-          keyStore.get(key) match {
-            case None => cancelHookOpt.traverse_(_.succeed(NotFound)).as(state)
+          st.keyStore.get(key) match {
+            case None => cancelHookOpt.traverse_(_.succeed(NotFound)).as(st)
             case Some(id) =>
-              cancelInProgress match {
+              st.cancelInProgress match {
                 // when cancelInprogress fiber is completed Completed msg is guaranteed to be in the queue user will always see the proper state
-                case Some(`id` -> fiber) => cancelHookOpt.traverse_(_.completeWith(fiber.join)).as(state)
+                case Some(`id` -> fiber) => cancelHookOpt.traverse_(_.completeWith(fiber.join)).as(st)
                 case _ =>
-                  inProgress match {
+                  st.inProgress match {
                     case Some(`id` -> fiber) =>
                       cancelRequestedBy.set(label) *>
                         fiber
@@ -142,14 +141,14 @@ object CancellableTaskQueue {
                               interruptFiber =>
                                 cancelHookOpt
                                   .traverse_(_.completeWith(interruptFiber.join))
-                                  .as(state.copy(cancelInProgress = Some(id -> interruptFiber)))
+                                  .as(st.copy(cancelInProgress = Some(id -> interruptFiber)))
                           )
                     case _ =>
-                      unsafe(taskStore(id))("key-id is not in sync")
+                      unsafe(st.taskStore(id))("key-id is not in sync")
                         .completeHook
                         .traverse_(_.succeed(Cancelled(label)))
                         .*>(cancelHookOpt.traverse_(_.succeed(Cancelled(label))))
-                        .as(state.copy(taskStore - id, keyStore - key))
+                        .as(st.copy(st.taskStore - id, st.keyStore - key))
                   }
               }
           }
@@ -161,59 +160,60 @@ object CancellableTaskQueue {
               case t @ (Duplicate | Rejected) => IO.dieMessage(s"in progress task is completed with '$t'")
               case h: TaskStatus[E, V]        => IO.succeed(h)
             }
-          keyStore.get(key) match {
-            case None => joinHook.succeed(NotFound).as(state)
+
+          st.keyStore.get(key) match {
+            case None => joinHook.succeed(NotFound).as(st)
             case Some(id) =>
-              inProgress match {
-                case Some((`id`, fiber)) => joinHook.completeWith(fiber.join).as(state)
+              st.inProgress match {
+                case Some((`id`, fiber)) => joinHook.completeWith(fiber.join).as(st)
                 case _ =>
-                  val add = unsafe(taskStore(id))("key-id is not in sync")
+                  val add = unsafe(st.taskStore(id))("key-id is not in sync")
                   add.completeHook match {
-                    case Some(completeHook) => joinHook.completeWith(awaitAndTrimForbiddenMsgs(completeHook)).as(state)
+                    case Some(completeHook) => joinHook.completeWith(awaitAndTrimForbiddenMsgs(completeHook)).as(st)
                     case None =>
                       for {
                         completeHook <- Promise.make[Nothing, TaskCompletionStatus[E, V]]
                         _            <- joinHook.completeWith(awaitAndTrimForbiddenMsgs(completeHook))
-                      } yield state.copy(taskStore = taskStore.updated(id, add.copy(completeHook = Some(completeHook))))
+                      } yield st.copy(taskStore = st.taskStore.updated(id, add.copy(completeHook = Some(completeHook))))
                   }
               }
           }
 
-        case GetKeys(p) => p.succeed(keyStore.keySet).as(state)
+        case GetKeys(p) => p.succeed(st.keyStore.keySet).as(st)
 
         case Completed(id, key) =>
-          cancelInProgress.traverse_ {
+          st.cancelInProgress.traverse_ {
             case (cid, task) =>
               assert(cid == id, s"Completed key '$key' does not match key of the task being cancelled '$cid'")
               //guarantees that cancelHookOpt will be fulfilled before fiber gets garbage collected
               task.join
           } *>
             ZIO
-              .optional(taskStore.size > 1) {
+              .optional(st.taskStore.size > 1) {
                 val nextId = findId(
                     id,
-                    taskStore.contains,
+                    st.taskStore.contains,
                     "cannot find next task in nonempty taskstore"
                 )
                 // Completed message is sent from the inProgress fiber after the task is completed. Waiting for this fiber to complete before running next task.
-                inProgress.traverse_(_._2.join) *>
-                  runTask(nextId, taskStore(nextId)).map(nextId -> _)
+                st.inProgress.traverse_(_._2.join) *>
+                  runTask(nextId, st.taskStore(nextId)).map(nextId -> _)
               }
-              .map(state.copy(taskStore - id, keyStore - key, _, None))
+              .map(inProg => st.copy(st.taskStore - id, st.keyStore - key, inProg, None))
       }
       .uninterruptible
-      .flatMap { state =>
+      .flatMap { st =>
         // controlled shutdown: this code can be interrupted only before or after message extraction+processing
         shutdown
           .get
           .flatMap(
               sd =>
-                if (!sd) runProcessing(q, shutdown, cancelRequestedBy, taskStoreSize, state)
+                if (!sd) runProcessing(q, shutdown, cancelRequestedBy, taskStoreSize, st)
                 else {
-                  inProgress.traverse_(_._2.interrupt) *>
+                  st.inProgress.traverse_(_._2.interrupt) *>
                     //guarantees that cancelHookOpt will be fulfilled
-                    cancelInProgress.traverse_(_._2.join) *>
-                    UIO.traverse_(taskStore)(_._2.completeHook.traverse_(_.interrupt))
+                    st.cancelInProgress.traverse_(_._2.join) *>
+                    UIO.foreach_(st.taskStore)(_._2.completeHook.traverse_(_.interrupt))
                 }
           )
       }
